@@ -383,10 +383,13 @@ def display_book_card(book_title, book_author, image_url, rating=None, num_ratin
         st.markdown('</div>', unsafe_allow_html=True)
 
 # Enhanced Function to display book cards with new features
-def display_enhanced_book_card(book_title, book_author, image_url, rating=None, num_ratings=None, year=None, similarity_score=None, isbn=None):
+def display_enhanced_book_card(book_title, book_author, image_url, rating=None, num_ratings=None, year=None, similarity_score=None, isbn=None, context=""):
     with st.container():
         st.markdown(f'<div class="book-card">', unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1, 3, 1])
+        
+        # Create unique keys by combining hash with context and timestamp
+        unique_id = f"{hash(book_title)}_{hash(book_author)}_{context}_{time.time()}"
         
         with col1:
             # Try to get better cover image from APIs
@@ -436,7 +439,7 @@ def display_enhanced_book_card(book_title, book_author, image_url, rating=None, 
         with col3:
             # Favorite button
             is_favorite = book_title in st.session_state.favorites
-            if st.button("❤️" if is_favorite else "🤍", key=f"fav_{hash(book_title)}", help="Add to favorites"):
+            if st.button("❤️" if is_favorite else "🤍", key=f"fav_{unique_id}", help="Add to favorites"):
                 if is_favorite:
                     st.session_state.favorites.remove(book_title)
                     st.success("Removed from favorites!")
@@ -451,14 +454,14 @@ def display_enhanced_book_card(book_title, book_author, image_url, rating=None, 
                 "Rate:", 
                 [0, 1, 2, 3, 4, 5], 
                 index=st.session_state.user_ratings.get(book_title, 0),
-                key=f"rating_{hash(book_title)}",
+                key=f"rating_{unique_id}",
                 format_func=lambda x: "⭐" if x == 0 else f"{'⭐' * x}"
             )
             if user_rating > 0:
                 st.session_state.user_ratings[book_title] = user_rating
             
             # Read button
-            if st.button("📚", key=f"read_{hash(book_title)}", help="Mark as read"):
+            if st.button("📚", key=f"read_{unique_id}", help="Mark as read"):
                 if book_title not in [item['title'] for item in st.session_state.reading_history]:
                     st.session_state.reading_history.append({
                         'title': book_title,
@@ -711,6 +714,166 @@ def get_advanced_recommendations(books, ratings, user_ratings, n_recommendations
     
     return pd.DataFrame()
 
+# Additional Recommendation Functions
+@st.cache_data
+def get_author_based_recommendations(selected_book, books, n=5):
+    """Get recommendations based on the same author"""
+    book_details = books[books['Book-Title'] == selected_book]
+    if book_details.empty:
+        return pd.DataFrame()
+    
+    author = book_details['Book-Author'].iloc[0]
+    
+    # Find other books by the same author
+    author_books = books[
+        (books['Book-Author'] == author) & 
+        (books['Book-Title'] != selected_book)
+    ].head(n)
+    
+    return author_books
+
+@st.cache_data
+def get_popular_recommendations(books, ratings, n=5):
+    """Get recommendations based on popularity (high ratings and many reviews)"""
+    # Calculate book popularity
+    ratings_with_books = ratings.merge(books, on='ISBN')
+    
+    # Group by book title and calculate stats
+    book_stats = ratings_with_books.groupby('Book-Title').agg({
+        'Book-Rating': ['mean', 'count'],
+        'Book-Author': 'first',
+        'Image-URL-M': 'first',
+        'Year-Of-Publication': 'first',
+        'ISBN': 'first'
+    }).reset_index()
+    
+    # Flatten column names
+    book_stats.columns = ['Book-Title', 'avg_rating', 'num_ratings', 'Book-Author', 'Image-URL-M', 'Year-Of-Publication', 'ISBN']
+    
+    # Filter books with at least 100 ratings and sort by rating
+    popular_books = book_stats[book_stats['num_ratings'] >= 100].sort_values('avg_rating', ascending=False)
+    
+    return popular_books.head(n)
+
+@st.cache_data
+def get_year_based_recommendations(selected_book, books, n=5):
+    """Get recommendations based on publication year (books from similar time period)"""
+    book_details = books[books['Book-Title'] == selected_book]
+    if book_details.empty:
+        return pd.DataFrame()
+    
+    year = book_details['Year-Of-Publication'].iloc[0]
+    
+    try:
+        # Handle different year formats and clean the data
+        year_str = str(year).strip()
+        
+        # Skip if year is not available or not numeric
+        if not year_str or year_str.lower() in ['nan', 'none', '', '0']:
+            # Fallback: return random books
+            return books[books['Book-Title'] != selected_book].sample(n=min(n, len(books)-1))
+        
+        year_num = int(float(year_str))
+        
+        # Create a more robust filter for years
+        # First, clean the Year-Of-Publication column
+        books_clean = books.copy()
+        books_clean['Year-Clean'] = books_clean['Year-Of-Publication'].astype(str).str.strip()
+        
+        # Filter out invalid years
+        books_clean = books_clean[
+            (books_clean['Year-Clean'] != '') &
+            (books_clean['Year-Clean'] != 'nan') &
+            (books_clean['Year-Clean'] != 'None') &
+            (books_clean['Year-Clean'] != '0')
+        ]
+        
+        # Convert to numeric, handling errors
+        books_clean['Year-Numeric'] = pd.to_numeric(books_clean['Year-Clean'], errors='coerce')
+        
+        # Filter books within reasonable year range (1800-2030) and within 10 years of selected book
+        similar_year_books = books_clean[
+            (books_clean['Year-Numeric'].notna()) &
+            (books_clean['Year-Numeric'] >= 1800) &
+            (books_clean['Year-Numeric'] <= 2030) &
+            (abs(books_clean['Year-Numeric'] - year_num) <= 10) &  # Increased range to 10 years
+            (books_clean['Book-Title'] != selected_book)
+        ].head(n)
+        
+        # If no books found with 10 years, try 20 years
+        if similar_year_books.empty:
+            similar_year_books = books_clean[
+                (books_clean['Year-Numeric'].notna()) &
+                (books_clean['Year-Numeric'] >= 1800) &
+                (books_clean['Year-Numeric'] <= 2030) &
+                (abs(books_clean['Year-Numeric'] - year_num) <= 20) &
+                (books_clean['Book-Title'] != selected_book)
+            ].head(n)
+        
+        # If still no books, return books from the same decade
+        if similar_year_books.empty:
+            decade = (year_num // 10) * 10
+            similar_year_books = books_clean[
+                (books_clean['Year-Numeric'].notna()) &
+                (books_clean['Year-Numeric'] >= decade) &
+                (books_clean['Year-Numeric'] < decade + 10) &
+                (books_clean['Book-Title'] != selected_book)
+            ].head(n)
+        
+        # Drop the temporary columns before returning
+        if not similar_year_books.empty:
+            similar_year_books = similar_year_books.drop(['Year-Clean', 'Year-Numeric'], axis=1)
+        
+        return similar_year_books
+        
+    except Exception as e:
+        # If anything fails, return some random books as fallback
+        st.warning(f"Could not filter by year ({str(e)}). Showing random books instead.")
+        return books[books['Book-Title'] != selected_book].sample(n=min(n, len(books)-1))
+
+@st.cache_data
+def get_random_recommendations(books, n=5):
+    """Get random book recommendations"""
+    # Sample random books
+    random_books = books.sample(n=min(n, len(books)))
+    return random_books
+
+@st.cache_data
+def get_title_similarity_recommendations(selected_book, books, n=5):
+    """Get recommendations based on title similarity (simple text matching)"""
+    import re
+    
+    # Extract key words from the selected book title
+    selected_words = set(re.findall(r'\b\w+\b', selected_book.lower()))
+    
+    # Remove common words
+    common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+    selected_words = selected_words - common_words
+    
+    if not selected_words:
+        return pd.DataFrame()
+    
+    # Find books with similar words in title
+    similar_books = []
+    for _, book in books.iterrows():
+        if book['Book-Title'] == selected_book:
+            continue
+            
+        book_words = set(re.findall(r'\b\w+\b', book['Book-Title'].lower()))
+        book_words = book_words - common_words
+        
+        # Calculate similarity as intersection over union
+        if book_words:
+            similarity = len(selected_words.intersection(book_words)) / len(selected_words.union(book_words))
+            if similarity > 0.1:  # At least 10% similarity
+                similar_books.append((book, similarity))
+    
+    # Sort by similarity and return top n
+    similar_books.sort(key=lambda x: x[1], reverse=True)
+    result_books = [book[0] for book in similar_books[:n]]
+    
+    return pd.DataFrame(result_books)
+
 # Genre Analysis Function  
 def analyze_genres(books):
     """Analyze book genres and trends"""
@@ -838,8 +1001,7 @@ def main():
         
         # Display user analytics
         display_user_analytics()
-        
-        # Dataset analytics
+          # Dataset analytics
         analyze_genres(books)
         
         # Advanced recommendations based on user ratings
@@ -855,12 +1017,12 @@ def main():
                         book['Book-Author'],
                         book.get('Image-URL-M', ''),
                         year=book.get('Year-Of-Publication', ''),
-                        isbn=book.get('ISBN', '')
+                        isbn=book.get('ISBN', ''),
+                        context="analytics"
                     )
             else:
                 st.info("Rate some books to get personalized author recommendations!")
-    
-    # Favorites page
+      # Favorites page
     elif page == "❤️ My Favorites":
         st.title("❤️ My Favorite Books")
         
@@ -883,7 +1045,8 @@ def main():
                         book['Book-Author'],
                         book.get('Image-URL-M', ''),
                         year=book.get('Year-Of-Publication', ''),
-                        isbn=book.get('ISBN', '')
+                        isbn=book.get('ISBN', ''),
+                        context="favorites"
                     )
                 else:
                     st.warning(f"Could not find details for: {book_title}")
@@ -930,8 +1093,7 @@ def main():
         ].head(books_to_show)
         
         st.write(f"Showing {len(filtered_books)} books matching your criteria")
-        
-        # Display books in a grid
+          # Display books in a grid
         num_cols = 2
         rows = len(filtered_books) // num_cols + (1 if len(filtered_books) % num_cols > 0 else 0)
         
@@ -948,11 +1110,12 @@ def main():
                             book['Image-URL-M'],
                             book['avg_rating'],
                             book['num_ratings'],
-                            book['Year-Of-Publication']
-                        )    # Book Recommendations page
+                            book['Year-Of-Publication'],
+                            context="popular_books"
+                        )# Book Recommendations page
     elif page == "🎯 Book Recommendations":
         st.title("🎯 Smart Book Recommendations")
-        st.write("Get personalized book recommendations based on a book you like")
+        st.write("Get personalized book recommendations using different algorithms")
         
         # Try to load preprocessed data first
         top_books_pkl, _, _ = load_preprocessed_data()
@@ -960,55 +1123,33 @@ def main():
         # Load collaborative filtering models separately
         pt, similarity_scores = load_collaborative_filtering_models()
         
-        # Prepare data for collaborative filtering
-        try:
-            if pt is not None:
-                st.success("Using preprocessed recommendation data for faster performance!")
+        # Book selection interface
+        st.subheader("📚 Step 1: Select a Book")
+        
+        # Enhanced search interface
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            search_term = st.text_input("Search by book title", placeholder="Enter part of a book title...")
+        with col2:
+            search_limit = st.selectbox("Max results", [10, 25, 50, 100], index=1)
+        
+        # Book selection logic
+        selected_book = None
+        available_books = books['Book-Title'].unique().tolist() if pt is None else sorted(pt.index.tolist())
+        
+        if search_term:
+            matched_books = [book for book in available_books if search_term.lower() in book.lower()][:search_limit]
+            if matched_books:
+                selected_book = st.selectbox("Select a book", matched_books)
             else:
-                pt, similarity_scores, books = prepare_collaborative_filtering_data(books, ratings, pt, None)
-        except Exception as e:
-            st.error(f"Error preparing recommendation data: {e}")
-            st.error("Please run `python preprocess.py` first to create optimized model files.")
-            st.stop()
-        
-        # Enhanced book selection interface
-        available_books = sorted(pt.index.tolist())
-        
-        # Create tabs for different search methods
-        tab1, tab2 = st.tabs(["🔍 Search Books", "🎲 Random Book"])
-        
-        with tab1:
-            st.subheader("Search for a Book You Like")
-            
-            # Enhanced search with multiple options
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                search_term = st.text_input("Search by book title", placeholder="Enter part of a book title...")
-            with col2:
-                search_limit = st.selectbox("Max results", [10, 25, 50, 100], index=1)
-            
-            if search_term:
-                matched_books = [book for book in available_books if search_term.lower() in book.lower()][:search_limit]
-                if matched_books:
-                    selected_book = st.selectbox("Select a book", matched_books)
-                else:
-                    st.warning("No books match your search term")
-                    selected_book = None
-            else:
-                st.info("Type in the search box above to find books")
-                selected_book = None
-        
-        with tab2:
-            st.subheader("Feeling Lucky?")
+                st.warning("No books match your search term")
+        else:
+            # Show some popular books as options
             if st.button("🎲 Pick Random Book"):
                 selected_book = np.random.choice(available_books)
                 st.success(f"Selected: {selected_book}")
-            else:
-                selected_book = None
-        
-        # Show recommendations if a book is selected
+          # Show selected book details
         if selected_book:
-            # Get book details
             book_details = get_book_details(selected_book, books)
             
             if not book_details.empty:
@@ -1019,33 +1160,125 @@ def main():
                     book['Book-Author'],
                     book.get('Image-URL-M', ''),
                     year=book.get('Year-Of-Publication', ''),
-                    isbn=book.get('ISBN', '')
+                    isbn=book.get('ISBN', ''),
+                    context="selected_book"
                 )
                 
-                # Recommendation settings
-                col1, col2 = st.columns([3, 1])
+                # Recommendation Type Selection
+                st.subheader("🎯 Step 2: Choose Recommendation Type")
+                st.write("Select how you want to get recommendations:")
+                
+                # Recommendation buttons in a grid
+                col1, col2, col3 = st.columns(3)
+                
                 with col1:
-                    st.subheader("🎯 Because you like this book, you might also enjoy...")
+                    smart_recs = st.button("🤖 Smart AI Recommendations", 
+                                         help="AI-powered collaborative filtering based on user preferences",
+                                         use_container_width=True)
+                    author_recs = st.button("👤 More by Same Author", 
+                                          help="Find other books by this author",
+                                          use_container_width=True)
+                
                 with col2:
+                    popular_recs = st.button("⭐ Popular Books", 
+                                           help="Currently trending and highly-rated books",
+                                           use_container_width=True)
+                    year_recs = st.button("📅 Books from Same Era", 
+                                        help="Books published around the same time",
+                                        use_container_width=True)
+                
+                with col3:
+                    similar_title_recs = st.button("📝 Similar Titles", 
+                                                  help="Books with similar title themes",
+                                                  use_container_width=True)
+                    random_recs = st.button("🎲 Random Discovery", 
+                                          help="Surprise me with random great books!",
+                                          use_container_width=True)
+                
+                # Settings
+                col_set1, col_set2 = st.columns([3, 1])
+                with col_set2:
                     num_recs = st.selectbox("Number of recommendations", [3, 5, 8, 10], index=1)
                 
-                # Get recommendations
-                recommendations = get_book_recommendations(selected_book, pt, None, books, n=num_recs)
+                # Process recommendations based on button clicked
+                recommendations = pd.DataFrame()
+                recommendation_title = ""
                 
+                if smart_recs:
+                    # Prepare collaborative filtering data if needed
+                    try:
+                        if pt is not None:
+                            recommendations = get_book_recommendations(selected_book, pt, None, books, n=num_recs)
+                            recommendation_title = "🤖 AI-Powered Smart Recommendations"
+                        else:
+                            pt, similarity_scores, books = prepare_collaborative_filtering_data(books, ratings, pt, None)
+                            recommendations = get_book_recommendations(selected_book, pt, similarity_scores, books, n=num_recs)
+                            recommendation_title = "🤖 AI-Powered Smart Recommendations"
+                    except Exception as e:
+                        st.error(f"Error with smart recommendations: {e}")
+                        st.info("Falling back to author-based recommendations...")
+                        recommendations = get_author_based_recommendations(selected_book, books, n=num_recs)
+                        recommendation_title = "👤 More Books by Same Author (Fallback)"
+                
+                elif author_recs:
+                    recommendations = get_author_based_recommendations(selected_book, books, n=num_recs)
+                    recommendation_title = "👤 More Books by Same Author"
+                
+                elif popular_recs:
+                    recommendations = get_popular_recommendations(books, ratings, n=num_recs)
+                    recommendation_title = "⭐ Currently Popular Books"
+                
+                elif year_recs:
+                    recommendations = get_year_based_recommendations(selected_book, books, n=num_recs)
+                    recommendation_title = "📅 Books from the Same Era"
+                
+                elif similar_title_recs:
+                    recommendations = get_title_similarity_recommendations(selected_book, books, n=num_recs)
+                    recommendation_title = "📝 Books with Similar Titles"
+                
+                elif random_recs:
+                    recommendations = get_random_recommendations(books, n=num_recs)
+                    recommendation_title = "🎲 Random Book Discovery"
+                
+                # Display recommendations
                 if not recommendations.empty:
+                    st.subheader(recommendation_title)
+                    
                     for i, book in recommendations.iterrows():
+                        # Handle different dataframe structures
+                        book_title = book.get('Book-Title', '')
+                        book_author = book.get('Book-Author', '')
+                        image_url = book.get('Image-URL-M', '')
+                        year = book.get('Year-Of-Publication', '')
+                        isbn = book.get('ISBN', '')
+                        similarity_score = book.get('Similarity-Score', None)
+                          # For popular recommendations, we might have different column names
+                        if 'avg_rating' in book:
+                            rating = book.get('avg_rating', None)
+                            num_ratings = book.get('num_ratings', None)
+                        else:
+                            rating = None
+                            num_ratings = None
+                        
                         display_enhanced_book_card(
-                            book['Book-Title'],
-                            book['Book-Author'],
-                            book.get('Image-URL-M', ''),
-                            year=book.get('Year-Of-Publication', ''),
-                            similarity_score=book['Similarity-Score'],
-                            isbn=book.get('ISBN', '')
+                            book_title,
+                            book_author,
+                            image_url,
+                            rating=rating,
+                            num_ratings=num_ratings,
+                            year=year,
+                            similarity_score=similarity_score,
+                            isbn=isbn,
+                            context="recommendations"
                         )
-                else:
-                    st.warning("No recommendations found for this book")
+                        
+                elif any([smart_recs, author_recs, popular_recs, year_recs, similar_title_recs, random_recs]):
+                    st.warning(f"No recommendations found using the selected method. Try a different recommendation type!")
+                
             else:
                 st.error("Book details not found")
+        else:
+            st.info("👆 Search for a book above to get started with recommendations!")
 
 if __name__ == "__main__":
     main()
